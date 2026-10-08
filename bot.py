@@ -68,6 +68,9 @@ MAX_VIDEO_SECONDS = int(
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
 
+# Official Kalakar web app for podcast/video captioning
+KALAKAR_URL = "https://app.kalakar.io/"
+
 VIDEO_FRAME_COUNT = 6
 
 
@@ -564,6 +567,29 @@ async def start(
     await update.message.reply_text(
         text,
         parse_mode="Markdown",
+        reply_markup=podcast_keyboard(),
+    )
+
+
+# ============================================================
+# PODCAST
+# ============================================================
+
+async def podcast_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    await update.message.reply_text(
+        "🎙 *PODCAST CAPTIONING*\n\n"
+        "For professional podcast captions and subtitles, "
+        "you can use the official Kalakar editor.\n\n"
+        "Kalakar supports desi-language captioning, including "
+        "Hindi, Punjabi, English and Hinglish, and provides "
+        "caption templates and export options.\n\n"
+        "Choose an option below:",
+        reply_markup=podcast_keyboard(),
+        parse_mode="Markdown",
     )
 
 
@@ -597,9 +623,12 @@ async def help_command(
         "🗣 Hinglish\n"
         "🪯 Punjabi\n\n"
 
+        "🎙 Podcast captions:\n"
+        "Use /podcast to open Kalakar or use the bot's podcast-style workflow.\n\n"
         "Commands:\n"
         "/start\n"
         "/help\n"
+        "/podcast\n"
         "/cancel"
     )
 
@@ -725,6 +754,28 @@ def language_keyboard():
             InlineKeyboardButton(
                 "🪯 Punjabi",
                 callback_data="language:punjabi",
+            ),
+        ],
+    ])
+
+
+# ============================================================
+# PODCAST / KALAKAR KEYBOARD
+# ============================================================
+
+def podcast_keyboard():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🎙 Open Kalakar for Podcast Captions",
+                url=KALAKAR_URL,
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🤖 Generate Podcast Caption Here",
+                callback_data="podcast:generate",
             ),
         ],
     ])
@@ -928,7 +979,10 @@ async def callback_handler(
 
     query = update.callback_query
 
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     data = query.data or ""
 
@@ -938,24 +992,19 @@ async def callback_handler(
 
     if data.startswith("style:"):
 
-        style = data.split(
-            ":",
-            1
-        )[1]
+        style = data.split(":", 1)[1]
 
         if style not in CAPTION_STYLES:
-
+            await query.message.reply_text(
+                "❌ Invalid caption style."
+            )
             return
 
-        context.user_data[
-            "style"
-        ] = style
+        context.user_data["style"] = style
 
         if style == "custom":
 
-            context.user_data[
-                "stage"
-            ] = "custom"
+            context.user_data["stage"] = "custom"
 
             await query.message.reply_text(
                 "✍️ *Enter your custom caption style.*\n\n"
@@ -964,19 +1013,15 @@ async def callback_handler(
                 "caption with a poetic feel.",
                 parse_mode="Markdown",
             )
-
             return
 
-        context.user_data[
-            "stage"
-        ] = "language"
+        context.user_data["stage"] = "language"
 
         await query.message.reply_text(
-            "🌐 *Choose language:*",
+            "🌐 *Choose your language:*",
             reply_markup=language_keyboard(),
             parse_mode="Markdown",
         )
-
         return
 
     # --------------------------------------------------------
@@ -985,27 +1030,69 @@ async def callback_handler(
 
     if data.startswith("language:"):
 
-        language = data.split(
-            ":",
-            1
-        )[1]
+        language = data.split(":", 1)[1]
 
         if language not in LANGUAGES:
-
+            await query.message.reply_text(
+                "❌ Invalid language selection."
+            )
             return
 
-        context.user_data[
-            "language"
-        ] = language
+        context.user_data["language"] = language
+        context.user_data["stage"] = "generating"
 
-        context.user_data[
-            "stage"
-        ] = "generating"
+        media_type = context.user_data.get("media_type")
 
-        await generate_caption(
-            query.message,
-            context,
-        )
+        if media_type == "photo":
+            await generate_photo_caption(
+                query.message,
+                context,
+            )
+
+        elif media_type == "video":
+            await generate_video_caption(
+                query.message,
+                context,
+            )
+
+        else:
+            await query.message.reply_text(
+                "❌ Media information was lost.\n\n"
+                "Please send the photo or video again."
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # PODCAST / KALAKAR
+    # --------------------------------------------------------
+
+    if data == "podcast:generate":
+
+        media_type = context.user_data.get("media_type")
+
+        if media_type == "video":
+            await query.message.reply_text(
+                "🎙 *Podcast mode*\n\n"
+                "Your uploaded video can be transcribed locally "
+                "with Whisper and then turned into a podcast-style "
+                "caption by Gemini.\n\n"
+                "Use the existing video caption flow by choosing "
+                "your language above, or open Kalakar for its "
+                "dedicated podcast caption editor.",
+                reply_markup=podcast_keyboard(),
+                parse_mode="Markdown",
+            )
+        else:
+            await query.message.reply_text(
+                "🎙 *Podcast caption generator*\n\n"
+                "Send a podcast video first, then choose your "
+                "language.\n\n"
+                "For Kalakar's dedicated podcast caption editor, "
+                "tap the button below.",
+                reply_markup=podcast_keyboard(),
+                parse_mode="Markdown",
+            )
 
         return
 
@@ -1015,11 +1102,22 @@ async def callback_handler(
 
     if data == "action:regenerate":
 
-        await generate_caption(
-            query.message,
-            context,
-        )
+        media_type = context.user_data.get("media_type")
 
+        if media_type == "photo":
+            await generate_photo_caption(
+                query.message,
+                context,
+            )
+        elif media_type == "video":
+            await generate_video_caption(
+                query.message,
+                context,
+            )
+        else:
+            await query.message.reply_text(
+                "❌ Please send a photo or video again."
+            )
         return
 
     # --------------------------------------------------------
@@ -1028,16 +1126,13 @@ async def callback_handler(
 
     if data == "action:style":
 
-        context.user_data[
-            "stage"
-        ] = "style"
+        context.user_data["stage"] = "style"
 
         await query.message.reply_text(
-            "🎨 *Choose another style:*",
+            "🎨 *Choose another caption style:*",
             reply_markup=style_keyboard(),
             parse_mode="Markdown",
         )
-
         return
 
     # --------------------------------------------------------
@@ -1046,16 +1141,13 @@ async def callback_handler(
 
     if data == "action:language":
 
-        context.user_data[
-            "stage"
-        ] = "language"
+        context.user_data["stage"] = "language"
 
         await query.message.reply_text(
-            "🌐 *Choose language:*",
+            "🌐 *Choose your language:*",
             reply_markup=language_keyboard(),
             parse_mode="Markdown",
         )
-
         return
 
     # --------------------------------------------------------
@@ -1069,7 +1161,6 @@ async def callback_handler(
         await query.message.reply_text(
             "📤 Send a new photo or video."
         )
-
         return
 
     # --------------------------------------------------------
@@ -1078,27 +1169,42 @@ async def callback_handler(
 
     if data == "video:subtitles":
 
+        if context.user_data.get("media_type") != "video":
+            await query.message.reply_text(
+                "❌ Please send a video first."
+            )
+            return
+
         await process_video_subtitles(
             query.message,
             context,
             include_caption=False,
         )
-
         return
 
     # --------------------------------------------------------
-    # VIDEO BOTH
+    # VIDEO CAPTION + SUBTITLES
     # --------------------------------------------------------
 
     if data == "video:both":
+
+        if context.user_data.get("media_type") != "video":
+            await query.message.reply_text(
+                "❌ Please send a video first."
+            )
+            return
 
         await process_video_subtitles(
             query.message,
             context,
             include_caption=True,
         )
-
         return
+
+    logger.warning(
+        "Unknown callback received: %s",
+        data,
+    )
 
 
 # ============================================================
@@ -2762,6 +2868,13 @@ def main():
         CommandHandler(
             "start",
             start
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "podcast",
+            podcast_command
         )
     )
 
