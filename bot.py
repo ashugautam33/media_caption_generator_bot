@@ -746,6 +746,34 @@ def style_keyboard():
 
 
 # ============================================================
+# VIDEO MODE KEYBOARD
+# ============================================================
+
+def video_mode_keyboard():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🎥 Normal Video Caption",
+                callback_data="video_mode:normal",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🎙 Podcast Caption + Subtitles",
+                callback_data="video_mode:podcast",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ Cancel",
+                callback_data="action:new",
+            ),
+        ],
+    ])
+
+
+# ============================================================
 # LANGUAGE KEYBOARD
 # ============================================================
 
@@ -955,16 +983,31 @@ async def media_handler(
         "original_caption"
     ] = message.caption or ""
 
-    context.user_data[
-        "stage"
-    ] = "style"
+    if media_type == "video":
 
-    await message.reply_text(
-        "✅ *Media received!*\n\n"
-        "🎨 Choose your caption style:",
-        reply_markup=style_keyboard(),
-        parse_mode="Markdown",
-    )
+        context.user_data[
+            "stage"
+        ] = "video_mode"
+
+        await message.reply_text(
+            "🎥 *Video received!*\n\n"
+            "How would you like to process this video?",
+            reply_markup=video_mode_keyboard(),
+            parse_mode="Markdown",
+        )
+
+    else:
+
+        context.user_data[
+            "stage"
+        ] = "style"
+
+        await message.reply_text(
+            "✅ *Media received!*\n\n"
+            "🎨 Choose your caption style:",
+            reply_markup=style_keyboard(),
+            parse_mode="Markdown",
+        )
 
 
 # ============================================================
@@ -981,6 +1024,40 @@ async def callback_handler(
     await query.answer()
 
     data = query.data or ""
+
+    # --------------------------------------------------------
+    # VIDEO MODE
+    # --------------------------------------------------------
+
+    if data.startswith("video_mode:"):
+
+        mode = data.split(":", 1)[1]
+
+        if mode == "normal":
+            context.user_data["video_mode"] = "normal"
+            context.user_data["stage"] = "style"
+
+            await query.message.reply_text(
+                "🎨 *Choose your video caption style:*",
+                reply_markup=style_keyboard(),
+                parse_mode="Markdown",
+            )
+            return
+
+        if mode == "podcast":
+            context.user_data["video_mode"] = "podcast"
+            context.user_data["style"] = "podcast"
+            context.user_data["stage"] = "language"
+
+            await query.message.reply_text(
+                "🎙 *Podcast mode selected.*\n\n"
+                "Choose the caption language:",
+                reply_markup=language_keyboard(),
+                parse_mode="Markdown",
+            )
+            return
+
+        return
 
     # --------------------------------------------------------
     # STYLE
@@ -1470,60 +1547,41 @@ def extract_audio(
     video_path: Path,
     audio_path: Path,
 ):
-    """Extract the first audio stream from a video as 16 kHz mono WAV.
-
-    Uses ffprobe first so that videos without an audio track produce a
-    useful error instead of the generic "Could not extract audio" message.
-    """
+    """Extract the first decodable audio stream as 16 kHz mono WAV."""
 
     if not video_path.exists() or video_path.stat().st_size == 0:
         raise RuntimeError("The downloaded video is missing or empty.")
 
-    # Check that FFmpeg can read the container and that an audio stream exists.
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # FFprobe is used for diagnostics only. FFmpeg performs the actual
+    # extraction because some MP4/MOV files have unusual stream metadata.
     probe_command = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "a:0",
-        "-show_entries", "stream=index,codec_name,codec_type",
+        "ffprobe", "-v", "error",
+        "-show_entries",
+        "stream=index,codec_type,codec_name:format=duration",
         "-of", "json",
         str(video_path),
     ]
 
     try:
         probe = subprocess.run(
-            probe_command,
-            capture_output=True,
-            text=True,
-            timeout=30,
+            probe_command, capture_output=True, text=True, timeout=30
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            "FFprobe timed out while checking the video."
-        )
+        probe = None
+        logger.warning("FFprobe timed out for %s", video_path)
     except FileNotFoundError:
-        raise RuntimeError(
-            "FFprobe/FFmpeg is not installed on the server."
-        )
+        raise RuntimeError("FFmpeg/FFprobe is not installed on the server.")
 
-    if probe.returncode != 0:
-        details = (probe.stderr or "").strip()[-1200:]
-        logger.error("FFprobe failed: %s", details)
-        raise RuntimeError(
-            "The video format could not be read by FFmpeg."
-            + (f"\nFFmpeg: {details}" if details else "")
-        )
-
-    try:
-        probe_data = json.loads(probe.stdout or "{}")
-    except json.JSONDecodeError:
-        probe_data = {}
-
-    streams = probe_data.get("streams", [])
-
-    if not streams:
-        raise RuntimeError(
-            "This video has no audio track. Please send a video with speech/audio."
-        )
+    if probe is not None and probe.returncode == 0:
+        try:
+            probe_data = json.loads(probe.stdout or "{}")
+            logger.info("Media streams: %s", probe_data.get("streams", []))
+        except json.JSONDecodeError:
+            logger.warning("Could not parse FFprobe output.")
+    elif probe is not None:
+        logger.warning("FFprobe diagnostic failed: %s", (probe.stderr or "")[-2000:])
 
     command = [
         "ffmpeg",
@@ -1531,7 +1589,7 @@ def extract_audio(
         "-loglevel", "error",
         "-y",
         "-i", str(video_path),
-        "-map", "0:a:0",
+        "-map", "0:a:0?",
         "-vn",
         "-ac", "1",
         "-ar", "16000",
@@ -1542,35 +1600,41 @@ def extract_audio(
 
     try:
         result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=180,
+            command, capture_output=True, text=True, timeout=180
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            "FFmpeg timed out while extracting the podcast audio."
-        )
+        raise RuntimeError("FFmpeg timed out while extracting audio from the video.")
     except FileNotFoundError:
-        raise RuntimeError(
-            "FFmpeg is not installed on the Railway server."
-        )
+        raise RuntimeError("FFmpeg is not installed on the Railway server.")
+
+    details = (result.stderr or "").strip()
 
     if result.returncode != 0:
-        details = (result.stderr or "").strip()[-1800:]
-        logger.error("FFmpeg audio extraction failed: %s", details)
+        logger.error("FFmpeg audio extraction failed:\n%s", details[-5000:])
+        lower = details.lower()
+        if "matches no streams" in lower or "does not contain any stream" in lower:
+            raise RuntimeError(
+                "This video does not contain a readable audio track. "
+                "Please send the original video with its audio enabled."
+            )
         raise RuntimeError(
-            "Could not extract audio from this video."
-            + (f"\nFFmpeg: {details}" if details else "")
+            "FFmpeg could not decode the video's audio track. "
+            "Please send the original MP4/MOV video."
         )
 
-    if not audio_path.exists() or audio_path.stat().st_size < 1000:
+    if not audio_path.exists() or audio_path.stat().st_size < 1024:
+        logger.error("No usable WAV created. FFmpeg: %s", details[-3000:])
         raise RuntimeError(
-            "FFmpeg finished but did not create a usable audio file."
+            "The video contains no readable audio track. "
+            "Please send a video with speech/audio."
         )
 
+    logger.info(
+        "Audio extracted successfully: %s (%d bytes)",
+        audio_path, audio_path.stat().st_size
+    )
 
-# ============================================================
+
 # WHISPER TRANSCRIPTION
 # ============================================================
 
