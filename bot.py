@@ -55,6 +55,11 @@ REQUESTED_GEMINI_MODEL = os.getenv(
     ""
 ).strip()
 
+REQUESTED_CAPTION_GEMINI_MODEL = os.getenv(
+    "CAPTION_GEMINI_MODEL",
+    ""
+).strip()
+
 WHISPER_MODEL_NAME = os.getenv(
     "WHISPER_MODEL",
     "base"
@@ -375,9 +380,109 @@ def find_gemini_model():
 GEMINI_MODEL = find_gemini_model()
 
 
+def find_fast_caption_model():
+    """
+    Select a lightweight Gemini model for normal photo/video captions.
+
+    Podcast/subtitle workflows keep using GEMINI_MODEL because they may
+    need more context from a transcript. Caption generation is intentionally
+    routed to a Flash-Lite/Flash model to reduce latency and token usage.
+    """
+
+    try:
+        available_models = []
+
+        for model in gemini_client.models.list():
+            model_name = normalize_model_name(
+                getattr(model, "name", "")
+            )
+
+            if not model_name:
+                continue
+
+            if not model_supports_generate_content(model):
+                continue
+
+            available_models.append(model_name)
+
+        available_models = sorted(set(available_models))
+
+        if REQUESTED_CAPTION_GEMINI_MODEL:
+            requested = normalize_model_name(
+                REQUESTED_CAPTION_GEMINI_MODEL
+            )
+            if requested in available_models:
+                logger.info(
+                    "Using requested fast caption model: %s",
+                    requested,
+                )
+                return requested
+
+            logger.warning(
+                "Requested CAPTION_GEMINI_MODEL '%s' is unavailable. "
+                "Selecting automatically.",
+                requested,
+            )
+
+        fast_preferences = [
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash-lite",
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+        ]
+
+        for preferred in fast_preferences:
+            if preferred in available_models:
+                logger.info(
+                    "Selected fast caption model: %s",
+                    preferred,
+                )
+                return preferred
+
+        flash_models = [
+            model for model in available_models
+            if "flash" in model.lower()
+            and "embedding" not in model.lower()
+            and "tts" not in model.lower()
+            and "image" not in model.lower()
+            and "live" not in model.lower()
+        ]
+
+        if flash_models:
+            stable = [
+                model for model in flash_models
+                if "preview" not in model.lower()
+                and "exp" not in model.lower()
+            ]
+            if stable:
+                flash_models = stable
+            flash_models.sort(reverse=True)
+            return flash_models[0]
+
+    except Exception:
+        logger.exception("Fast caption model discovery failed.")
+
+    # Safe fallback: use the already validated main model.
+    return GEMINI_MODEL
+
+
+GEMINI_CAPTION_MODEL = find_fast_caption_model()
+
+
 logger.info(
     "FINAL GEMINI MODEL: %s",
     GEMINI_MODEL
+)
+
+logger.info(
+    "FAST CAPTION GEMINI MODEL: %s",
+    GEMINI_CAPTION_MODEL
 )
 
 
@@ -1860,61 +1965,32 @@ def build_caption_prompt(
             style["instruction"]
         )
 
-    prompt = f"""
-You are an expert social media caption writer.
+    prompt = f"""You are an Instagram caption writer.
+Analyze the supplied media and create a natural, engaging caption.
 
-Analyze the supplied media carefully.
+Style: {style["name"]}
+Instruction: {style_instruction}
+Language: {language["name"]} — {language["instruction"]}
+User description: {original_caption or "None"}
+Transcript: {transcript or "None"}
 
-STYLE:
-{style["name"]}
+Rules:
+- Describe only what the media supports.
+- Do not invent people, places or events.
+- Use a few suitable emojis.
+- Create exactly 10 relevant hashtags.
+- Do not copy song lyrics.
+- Do not mention AI or Gemini.
 
-STYLE INSTRUCTION:
-{style_instruction}
-
-LANGUAGE:
-{language["name"]}
-
-LANGUAGE INSTRUCTION:
-{language["instruction"]}
-
-USER DESCRIPTION:
-{original_caption or "No description provided."}
-
-VIDEO TRANSCRIPT:
-{transcript or "No speech detected."}
-
-RULES:
-
-1. Accurately describe what is visible.
-2. Use the transcript as supporting context.
-3. Never invent people, locations or events.
-4. Do not identify unknown people by name.
-5. Make the caption natural and human.
-6. Use suitable emojis.
-7. Generate exactly 12 relevant hashtags.
-8. Avoid spam hashtags.
-9. Do not copy copyrighted song lyrics.
-10. Bollywood style must be original.
-11. Do not mention AI.
-12. Do not mention Gemini.
-13. Do not explain your reasoning.
-
-OUTPUT EXACTLY:
-
+Return exactly:
 📸 CAPTION
-
-[main caption]
-
+[caption]
 
 #️⃣ HASHTAGS
-
-[12 hashtags]
-
+[10 hashtags]
 
 ✨ SHORT CAPTION
-
-[short caption]
-"""
+[short caption]"""
 
     return prompt
 
@@ -1926,6 +2002,8 @@ OUTPUT EXACTLY:
 def generate_with_gemini(
     prompt,
     image_paths=None,
+    model=None,
+    max_output_tokens=600,
 ):
 
     parts = [
@@ -1955,7 +2033,7 @@ def generate_with_gemini(
         gemini_client
         .models
         .generate_content(
-            model=GEMINI_MODEL,
+            model=(model or GEMINI_MODEL),
             contents=[
                 types.Content(
                     role="user",
@@ -1963,7 +2041,7 @@ def generate_with_gemini(
                 )
             ],
             config=types.GenerateContentConfig(
-                max_output_tokens=1200,
+                max_output_tokens=max_output_tokens,
             ),
         )
     )
@@ -2110,6 +2188,8 @@ async def generate_photo_caption(
             generate_with_gemini,
             prompt,
             [media_path],
+            GEMINI_CAPTION_MODEL,
+            500,
         )
 
         context.user_data[
@@ -2272,7 +2352,9 @@ async def generate_video_caption(
         result = await asyncio.to_thread(
             generate_with_gemini,
             prompt,
-            frames
+            frames,
+            GEMINI_CAPTION_MODEL,
+            500,
         )
 
         context.user_data[
