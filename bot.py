@@ -673,9 +673,9 @@ async def cancel(
 # STYLE KEYBOARD
 # ============================================================
 
-def style_keyboard():
+def style_keyboard(include_podcast=True):
 
-    return InlineKeyboardMarkup([
+    rows = [
 
         [
             InlineKeyboardButton(
@@ -731,8 +731,10 @@ def style_keyboard():
                 callback_data="style:bollywood",
             ),
         ],
+    ]
 
-        [
+    if include_podcast:
+        rows.append([
             InlineKeyboardButton(
                 "🎙️ Podcast",
                 callback_data="style:podcast",
@@ -741,8 +743,16 @@ def style_keyboard():
                 "✍️ Custom",
                 callback_data="style:custom",
             ),
-        ],
-    ])
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton(
+                "✍️ Custom",
+                callback_data="style:custom",
+            ),
+        ])
+
+    return InlineKeyboardMarkup(rows)
 
 
 # ============================================================
@@ -754,14 +764,20 @@ def video_mode_keyboard():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
-                "🎥 Normal Video Caption",
+                "⭐ 🎥 Video Caption",
                 callback_data="video_mode:normal",
             ),
         ],
         [
             InlineKeyboardButton(
-                "🎙 Podcast Caption + Subtitles",
+                "🎙 Podcast",
                 callback_data="video_mode:podcast",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📝 Subtitles",
+                callback_data="video_mode:subtitles",
             ),
         ],
         [
@@ -1038,8 +1054,10 @@ async def callback_handler(
             context.user_data["stage"] = "style"
 
             await query.message.reply_text(
-                "🎨 *Choose your video caption style:*",
-                reply_markup=style_keyboard(),
+                "🎥 *Video Caption selected.*\n\n"
+                "Best for devotional, music, travel, dance, Reels and other videos.\n\n"
+                "🎨 Choose your caption style:",
+                reply_markup=style_keyboard(include_podcast=False),
                 parse_mode="Markdown",
             )
             return
@@ -1051,7 +1069,21 @@ async def callback_handler(
 
             await query.message.reply_text(
                 "🎙 *Podcast mode selected.*\n\n"
+                "For talking, interview and podcast videos.\n\n"
                 "Choose the caption language:",
+                reply_markup=language_keyboard(),
+                parse_mode="Markdown",
+            )
+            return
+
+        if mode == "subtitles":
+            context.user_data["video_mode"] = "subtitles"
+            context.user_data["stage"] = "language"
+
+            await query.message.reply_text(
+                "📝 *Subtitles mode selected.*\n\n"
+                "The video must contain readable speech/audio.\n\n"
+                "Choose the subtitle language:",
                 reply_markup=language_keyboard(),
                 parse_mode="Markdown",
             )
@@ -1072,6 +1104,16 @@ async def callback_handler(
 
         if style not in CAPTION_STYLES:
 
+            return
+
+        if (
+            style == "podcast"
+            and context.user_data.get("video_mode") != "podcast"
+        ):
+            await query.message.reply_text(
+                "🎙 Podcast style is available through the Podcast mode.\n\n"
+                "Please use the Podcast option from the video mode dialog."
+            )
             return
 
         context.user_data[
@@ -1134,12 +1176,21 @@ async def callback_handler(
         if media_type == "photo":
             await generate_photo_caption(query.message, context)
         elif media_type == "video":
-            if context.user_data.get("style") == "podcast":
+            video_mode = context.user_data.get("video_mode", "normal")
+
+            if video_mode == "podcast":
                 await process_video_subtitles(
                     query.message,
                     context,
                     include_caption=True,
                     podcast_mode=True,
+                )
+            elif video_mode == "subtitles":
+                await process_video_subtitles(
+                    query.message,
+                    context,
+                    include_caption=True,
+                    podcast_mode=False,
                 )
             else:
                 await generate_video_caption(query.message, context)
@@ -1161,7 +1212,24 @@ async def callback_handler(
         if media_type == "photo":
             await generate_photo_caption(query.message, context)
         elif media_type == "video":
-            await generate_video_caption(query.message, context)
+            video_mode = context.user_data.get("video_mode", "normal")
+
+            if video_mode == "podcast":
+                await process_video_subtitles(
+                    query.message,
+                    context,
+                    include_caption=True,
+                    podcast_mode=True,
+                )
+            elif video_mode == "subtitles":
+                await process_video_subtitles(
+                    query.message,
+                    context,
+                    include_caption=True,
+                    podcast_mode=False,
+                )
+            else:
+                await generate_video_caption(query.message, context)
         else:
             await query.message.reply_text(
                 "❌ Please send the media again."
@@ -2175,48 +2243,26 @@ async def generate_video_caption(
                 "Unable to extract video frames."
             )
 
+        # ----------------------------------------------------
+        # NORMAL VIDEO CAPTION DOES NOT REQUIRE AUDIO
+        # ----------------------------------------------------
+        # A normal video can be completely silent. Gemini can
+        # generate a caption from the extracted video frames.
+        # Whisper/audio processing is reserved for Podcast and
+        # Subtitle modes.
+
         await safe_edit_message(
-                processing_message,
-                
-            "🎙 *Transcribing video...*\n\n"
-            "Whisper is processing the audio.",
+            processing_message,
+            "✍️ Writing your caption",
             parse_mode="Markdown",
         )
 
-        audio_path = (
-            work_directory
-            / "audio.wav"
-        )
-
-        extract_audio(
-            video_path,
-            audio_path
-        )
-
-        language = context.user_data.get(
-            "language",
-            "english"
-        )
-
-        transcript_data = await asyncio.to_thread(
-            transcribe_audio,
-            audio_path,
-            language
-        )
-
-        transcript = "\n".join(
-            segment["text"]
-            for segment
-            in transcript_data["segments"]
-        )
-
-        await safe_edit_message(
-                processing_message,
-                
-            "🤖 *Creating caption...*\n\n"
-            "✍️ creating your caption.",
-            parse_mode="Markdown",
-        )
+        transcript = ""
+        transcript_data = {
+            "language": None,
+            "segments": [],
+            "words": [],
+        }
 
         prompt = build_caption_prompt(
             context,
