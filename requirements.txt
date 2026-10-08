@@ -2,3 +2,4 @@ python-telegram-bot==22.8
 google-genai
 python-dotenv
 faster-whisper
+yt-dlp
