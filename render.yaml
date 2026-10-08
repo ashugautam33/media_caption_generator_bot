@@ -1,9 +1,0 @@
-services:
-  - type: worker
-    name: media-caption-generator-bot
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
-    autoDeploy: true
-    restartPolicyType: on_failure
-    restartPolicyMaxRetries: 10
