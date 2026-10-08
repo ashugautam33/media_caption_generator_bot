@@ -49,9 +49,9 @@ GEMINI_API_KEY = os.getenv(
     ""
 ).strip()
 
-GEMINI_MODEL = os.getenv(
+REQUESTED_GEMINI_MODEL = os.getenv(
     "GEMINI_MODEL",
-    "gemini-2.5-flash-lite"
+    ""
 ).strip()
 
 WHISPER_MODEL_NAME = os.getenv(
@@ -97,23 +97,286 @@ logger = logging.getLogger(
 if not BOT_TOKEN:
 
     raise RuntimeError(
-        "BOT_TOKEN is missing."
+        "BOT_TOKEN is missing. "
+        "Add BOT_TOKEN to Railway Variables."
     )
 
 
 if not GEMINI_API_KEY:
 
     raise RuntimeError(
-        "GEMINI_API_KEY is missing."
+        "GEMINI_API_KEY is missing. "
+        "Add GEMINI_API_KEY to Railway Variables."
     )
 
 
 # ============================================================
-# GEMINI
+# GEMINI CLIENT
 # ============================================================
+
+logger.info(
+    "Initializing Gemini client..."
+)
 
 gemini_client = genai.Client(
     api_key=GEMINI_API_KEY
+)
+
+
+# ============================================================
+# GEMINI MODEL DISCOVERY
+# ============================================================
+
+def normalize_model_name(
+    name
+):
+
+    if not name:
+        return ""
+
+    name = str(name).strip()
+
+    if name.startswith("models/"):
+
+        name = name[
+            len("models/"):
+        ]
+
+    return name
+
+
+def model_supports_generate_content(
+    model
+):
+
+    actions = getattr(
+        model,
+        "supported_actions",
+        None
+    )
+
+    if actions:
+
+        for action in actions:
+
+            if str(action).lower() == (
+                "generatecontent"
+            ):
+
+                return True
+
+    # Some SDK versions expose the
+    # information differently.
+    return True
+
+
+def find_gemini_model():
+
+    logger.info(
+        "Checking Gemini models available "
+        "to the API key..."
+    )
+
+    try:
+
+        available_models = []
+
+        for model in gemini_client.models.list():
+
+            model_name = normalize_model_name(
+                getattr(
+                    model,
+                    "name",
+                    ""
+                )
+            )
+
+            if not model_name:
+
+                continue
+
+            if not model_supports_generate_content(
+                model
+            ):
+
+                continue
+
+            available_models.append(
+                model_name
+            )
+
+        available_models = sorted(
+            set(available_models)
+        )
+
+        logger.info(
+            "Models available for generateContent:"
+        )
+
+        for model_name in available_models:
+
+            logger.info(
+                "  - %s",
+                model_name
+            )
+
+        if not available_models:
+
+            raise RuntimeError(
+                "The Gemini API key does not have "
+                "any generateContent models available."
+            )
+
+        # ----------------------------------------------------
+        # If user explicitly specified a model,
+        # try it first.
+        # ----------------------------------------------------
+
+        if REQUESTED_GEMINI_MODEL:
+
+            requested = normalize_model_name(
+                REQUESTED_GEMINI_MODEL
+            )
+
+            if requested in available_models:
+
+                logger.info(
+                    "Using requested Gemini model: %s",
+                    requested
+                )
+
+                return requested
+
+            logger.warning(
+                "Requested model '%s' is not "
+                "available. Searching automatically.",
+                requested
+            )
+
+        # ----------------------------------------------------
+        # Preferred models.
+        #
+        # These are ordered from newest/general purpose
+        # toward older lightweight models.
+        # ----------------------------------------------------
+
+        preferred_models = [
+
+            "gemini-3.8-flash",
+
+            "gemini-3.7-flash",
+
+            "gemini-3.6-flash",
+
+            "gemini-3.5-flash",
+
+            "gemini-3.5-flash-lite",
+
+            "gemini-3.1-flash-lite",
+
+            "gemini-2.5-flash",
+
+            "gemini-2.5-flash-lite",
+
+            "gemini-2.0-flash",
+
+            "gemini-2.0-flash-lite",
+
+        ]
+
+        for preferred in preferred_models:
+
+            if preferred in available_models:
+
+                logger.info(
+                    "Automatically selected Gemini model: %s",
+                    preferred
+                )
+
+                return preferred
+
+        # ----------------------------------------------------
+        # Generic Flash fallback.
+        # ----------------------------------------------------
+
+        flash_models = []
+
+        for model_name in available_models:
+
+            lower = model_name.lower()
+
+            if (
+                "flash" in lower
+                and "embedding" not in lower
+                and "tts" not in lower
+                and "image" not in lower
+                and "live" not in lower
+            ):
+
+                flash_models.append(
+                    model_name
+                )
+
+        if flash_models:
+
+            # Prefer models that are not preview/experimental.
+            stable = [
+                model
+                for model in flash_models
+                if "preview" not in model.lower()
+                and "exp" not in model.lower()
+            ]
+
+            if stable:
+
+                flash_models = stable
+
+            flash_models.sort(
+                reverse=True
+            )
+
+            selected = flash_models[0]
+
+            logger.info(
+                "Selected Flash fallback: %s",
+                selected
+            )
+
+            return selected
+
+        # ----------------------------------------------------
+        # Last resort: first generateContent model.
+        # ----------------------------------------------------
+
+        selected = available_models[0]
+
+        logger.warning(
+            "No preferred Flash model found. "
+            "Using: %s",
+            selected
+        )
+
+        return selected
+
+    except Exception as error:
+
+        logger.exception(
+            "Gemini model discovery failed."
+        )
+
+        raise RuntimeError(
+            "Unable to retrieve Gemini models. "
+            "Please check GEMINI_API_KEY and "
+            "your Google AI Studio project."
+        ) from error
+
+
+GEMINI_MODEL = find_gemini_model()
+
+
+logger.info(
+    "FINAL GEMINI MODEL: %s",
+    GEMINI_MODEL
 )
 
 
@@ -133,12 +396,12 @@ whisper_model = WhisperModel(
 )
 
 logger.info(
-    "Whisper model loaded."
+    "Whisper model loaded successfully."
 )
 
 
 # ============================================================
-# STYLES
+# CAPTION STYLES
 # ============================================================
 
 CAPTION_STYLES = {
@@ -176,7 +439,7 @@ CAPTION_STYLES = {
         "name": "Travel",
         "instruction": (
             "Create a travel-inspired caption focused "
-            "on the journey, location, atmosphere or adventure."
+            "on journey, atmosphere, adventure or location."
         ),
     },
 
@@ -214,7 +477,7 @@ CAPTION_STYLES = {
         "name": "Bollywood",
         "instruction": (
             "Create an original cinematic Bollywood-inspired "
-            "caption. Do not copy song lyrics."
+            "caption. Never copy song lyrics."
         ),
     },
 
@@ -237,7 +500,7 @@ LANGUAGES = {
         "name": "English",
         "whisper": "en",
         "instruction": (
-            "Write the caption and subtitles in natural English."
+            "Write the caption in natural English."
         ),
     },
 
@@ -291,11 +554,10 @@ async def start(
         "• Punjabi captions\n"
         "• Hinglish captions\n"
         "• Video subtitles\n"
-        "• Word-synchronized captions\n"
-        "• Captioned MP4 videos\n\n"
-        "🤖 AI: Gemini\n"
-        "🎙 Speech recognition: Whisper\n"
-        "🎬 Video processing: FFmpeg\n\n"
+        "• Captioned videos\n\n"
+        "🤖 Gemini AI\n"
+        "🎙 Whisper speech recognition\n"
+        "🎬 FFmpeg video processing\n\n"
         "📤 Send your media to begin."
     )
 
@@ -318,14 +580,13 @@ async def help_command(
         "📖 *HOW TO USE*\n\n"
 
         "📸 *PHOTO*\n"
-        "Send a photo → choose style → choose language "
+        "Send photo → choose style → choose language "
         "→ receive caption + hashtags.\n\n"
 
         "🎥 *VIDEO*\n"
-        "Send a video → choose style → choose language "
-        "→ choose video processing option.\n\n"
+        "Send video → choose style → choose language.\n\n"
 
-        "🎬 *VIDEO FEATURES*\n"
+        "Then choose:\n"
         "🤖 AI Caption\n"
         "📝 Subtitles\n"
         "🎬 Caption + Subtitles\n\n"
@@ -337,9 +598,9 @@ async def help_command(
         "🪯 Punjabi\n\n"
 
         "Commands:\n"
-        "/start - Start bot\n"
-        "/help - Help\n"
-        "/cancel - Cancel"
+        "/start\n"
+        "/help\n"
+        "/cancel"
     )
 
     await update.message.reply_text(
@@ -500,8 +761,7 @@ def photo_result_keyboard():
                 "📤 New Media",
                 callback_data="action:new",
             ),
-        ],
-    ])
+    ]])
 
 
 # ============================================================
@@ -571,37 +831,21 @@ async def media_handler(
     file_id = None
     file_size = None
 
-    # --------------------------------------------------------
-    # PHOTO
-    # --------------------------------------------------------
-
     if message.photo:
 
         photo = message.photo[-1]
 
         media_type = "photo"
-
         file_id = photo.file_id
-
         file_size = photo.file_size
-
-    # --------------------------------------------------------
-    # VIDEO
-    # --------------------------------------------------------
 
     elif message.video:
 
         video = message.video
 
         media_type = "video"
-
         file_id = video.file_id
-
         file_size = video.file_size
-
-    # --------------------------------------------------------
-    # DOCUMENT
-    # --------------------------------------------------------
 
     elif message.document:
 
@@ -629,16 +873,11 @@ async def media_handler(
             return
 
         file_id = document.file_id
-
         file_size = document.file_size
 
     else:
 
         return
-
-    # --------------------------------------------------------
-    # SIZE
-    # --------------------------------------------------------
 
     if (
         file_size
@@ -652,25 +891,23 @@ async def media_handler(
 
         return
 
-    # --------------------------------------------------------
-    # SAVE STATE
-    # --------------------------------------------------------
-
     context.user_data.clear()
 
-    context.user_data["file_id"] = file_id
+    context.user_data[
+        "file_id"
+    ] = file_id
 
-    context.user_data["media_type"] = media_type
+    context.user_data[
+        "media_type"
+    ] = media_type
 
-    context.user_data["original_caption"] = (
-        message.caption or ""
-    )
+    context.user_data[
+        "original_caption"
+    ] = message.caption or ""
 
-    context.user_data["stage"] = "style"
-
-    # --------------------------------------------------------
-    # STYLE
-    # --------------------------------------------------------
+    context.user_data[
+        "stage"
+    ] = "style"
 
     await message.reply_text(
         "✅ *Media received!*\n\n"
@@ -695,9 +932,9 @@ async def callback_handler(
 
     data = query.data or ""
 
-    # ========================================================
+    # --------------------------------------------------------
     # STYLE
-    # ========================================================
+    # --------------------------------------------------------
 
     if data.startswith("style:"):
 
@@ -723,8 +960,8 @@ async def callback_handler(
             await query.message.reply_text(
                 "✍️ *Enter your custom caption style.*\n\n"
                 "Example:\n"
-                "Create a classy emotional Instagram caption "
-                "with a poetic feel.",
+                "Create a classy emotional Instagram "
+                "caption with a poetic feel.",
                 parse_mode="Markdown",
             )
 
@@ -742,9 +979,9 @@ async def callback_handler(
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # LANGUAGE
-    # ========================================================
+    # --------------------------------------------------------
 
     if data.startswith("language:"):
 
@@ -772,9 +1009,9 @@ async def callback_handler(
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # REGENERATE
-    # ========================================================
+    # --------------------------------------------------------
 
     if data == "action:regenerate":
 
@@ -785,9 +1022,9 @@ async def callback_handler(
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # NEW STYLE
-    # ========================================================
+    # --------------------------------------------------------
 
     if data == "action:style":
 
@@ -803,9 +1040,9 @@ async def callback_handler(
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # NEW LANGUAGE
-    # ========================================================
+    # --------------------------------------------------------
 
     if data == "action:language":
 
@@ -814,16 +1051,16 @@ async def callback_handler(
         ] = "language"
 
         await query.message.reply_text(
-            "🌐 *Choose another language:*",
+            "🌐 *Choose language:*",
             reply_markup=language_keyboard(),
             parse_mode="Markdown",
         )
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # NEW MEDIA
-    # ========================================================
+    # --------------------------------------------------------
 
     if data == "action:new":
 
@@ -835,9 +1072,9 @@ async def callback_handler(
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # VIDEO SUBTITLES
-    # ========================================================
+    # --------------------------------------------------------
 
     if data == "video:subtitles":
 
@@ -849,9 +1086,9 @@ async def callback_handler(
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # VIDEO BOTH
-    # ========================================================
+    # --------------------------------------------------------
 
     if data == "video:both":
 
@@ -977,28 +1214,7 @@ async def download_media(
 
 
 # ============================================================
-# MIME
-# ============================================================
-
-def image_mime_type(
-    path: Path
-):
-
-    mime, _ = mimetypes.guess_type(
-        str(path)
-    )
-
-    if mime and mime.startswith(
-        "image/"
-    ):
-
-        return mime
-
-    return "image/jpeg"
-
-
-# ============================================================
-# FFPROBE DURATION
+# VIDEO DURATION
 # ============================================================
 
 def video_duration(
@@ -1063,7 +1279,7 @@ def extract_video_frames(
 
     duration = min(
         duration,
-        MAX_VIDEO_SECONDS,
+        MAX_VIDEO_SECONDS
     )
 
     if duration <= 2:
@@ -1074,27 +1290,28 @@ def extract_video_frames(
 
         timestamps = []
 
-        for i in range(
+        for index in range(
             VIDEO_FRAME_COUNT
         ):
 
             fraction = (
-                i /
-                max(
+                index
+                / max(
                     VIDEO_FRAME_COUNT - 1,
-                    1,
+                    1
                 )
             )
 
             timestamp = (
-                duration * fraction
+                duration
+                * fraction
             )
 
             if timestamp >= duration:
 
                 timestamp = max(
                     duration - 0.2,
-                    0,
+                    0
                 )
 
             timestamps.append(
@@ -1108,8 +1325,8 @@ def extract_video_frames(
     ):
 
         output_file = (
-            output_directory /
-            f"frame_{index:02d}.jpg"
+            output_directory
+            / f"frame_{index:02d}.jpg"
         )
 
         command = [
@@ -1138,6 +1355,10 @@ def extract_video_frames(
             )
 
         except subprocess.TimeoutExpired:
+
+            logger.warning(
+                "Frame extraction timeout."
+            )
 
             continue
 
@@ -1187,6 +1408,10 @@ def extract_audio(
 
     if result.returncode != 0:
 
+        logger.error(
+            result.stderr[-4000:]
+        )
+
         raise RuntimeError(
             "Could not extract audio."
         )
@@ -1212,20 +1437,19 @@ def transcribe_audio(
         LANGUAGES["english"]
     )
 
-    language_code = (
+    whisper_language = (
         language_info["whisper"]
     )
 
     logger.info(
-        "Starting transcription. "
-        "Requested language=%s",
-        language_key,
+        "Transcribing audio. Language=%s",
+        whisper_language or "auto"
     )
 
     segments, info = (
         whisper_model.transcribe(
             str(audio_path),
-            language=language_code,
+            language=whisper_language,
             beam_size=5,
             word_timestamps=True,
             vad_filter=True,
@@ -1239,21 +1463,19 @@ def transcribe_audio(
 
     all_words = []
 
-    detected_language = (
-        getattr(
-            info,
-            "language",
-            None
-        )
+    detected_language = getattr(
+        info,
+        "language",
+        None
     )
 
     for segment in segments:
 
-        segment_text = (
+        text = (
             segment.text or ""
         ).strip()
 
-        if not segment_text:
+        if not text:
 
             continue
 
@@ -1296,7 +1518,7 @@ def transcribe_audio(
             "end": float(
                 segment.end
             ),
-            "text": segment_text,
+            "text": text,
             "words": words,
         })
 
@@ -1308,7 +1530,7 @@ def transcribe_audio(
 
 
 # ============================================================
-# BUILD CAPTION PROMPT
+# CAPTION PROMPT
 # ============================================================
 
 def build_caption_prompt(
@@ -1318,32 +1540,32 @@ def build_caption_prompt(
 
     style_key = context.user_data.get(
         "style",
-        "instagram",
+        "instagram"
     )
 
     language_key = context.user_data.get(
         "language",
-        "english",
+        "english"
     )
 
     style = CAPTION_STYLES.get(
         style_key,
-        CAPTION_STYLES["instagram"],
+        CAPTION_STYLES["instagram"]
     )
 
     language = LANGUAGES.get(
         language_key,
-        LANGUAGES["english"],
+        LANGUAGES["english"]
     )
 
     custom_style = context.user_data.get(
         "custom_style",
-        "",
+        ""
     )
 
     original_caption = context.user_data.get(
         "original_caption",
-        "",
+        ""
     )
 
     if style_key == "custom":
@@ -1355,13 +1577,12 @@ def build_caption_prompt(
 
     else:
 
-        style_instruction = style[
-            "instruction"
-        ]
+        style_instruction = (
+            style["instruction"]
+        )
 
     prompt = f"""
-You are an expert Instagram and social media
-caption writer.
+You are an expert social media caption writer.
 
 Analyze the supplied media carefully.
 
@@ -1383,24 +1604,23 @@ USER DESCRIPTION:
 VIDEO TRANSCRIPT:
 {transcript or "No speech detected."}
 
-IMPORTANT:
+RULES:
 
-- Accurately describe what is visible.
-- Use the transcript only as supporting context.
-- Do not invent people, places or events.
-- Do not identify unknown people.
-- Do not claim facts that are not supported.
-- Make the caption natural.
-- Use suitable emojis.
-- Generate exactly 12 relevant hashtags.
-- Avoid generic spam hashtags.
-- Do not copy song lyrics.
-- Bollywood style must be original.
-- Do not mention AI.
-- Do not mention Gemini.
-- Do not explain your reasoning.
+1. Accurately describe what is visible.
+2. Use the transcript as supporting context.
+3. Never invent people, locations or events.
+4. Do not identify unknown people by name.
+5. Make the caption natural and human.
+6. Use suitable emojis.
+7. Generate exactly 12 relevant hashtags.
+8. Avoid spam hashtags.
+9. Do not copy copyrighted song lyrics.
+10. Bollywood style must be original.
+11. Do not mention AI.
+12. Do not mention Gemini.
+13. Do not explain your reasoning.
 
-OUTPUT:
+OUTPUT EXACTLY:
 
 📸 CAPTION
 
@@ -1464,7 +1684,6 @@ def generate_with_gemini(
                 )
             ],
             config=types.GenerateContentConfig(
-                temperature=0.9,
                 max_output_tokens=1200,
             ),
         )
@@ -1476,16 +1695,16 @@ def generate_with_gemini(
             "Gemini returned no response."
         )
 
-    text = response.text
+    result = response.text
 
-    if not text:
+    if not result:
 
         raise RuntimeError(
             "Gemini returned an empty response."
         )
 
     return clean_text(
-        text
+        result
     )
 
 
@@ -1540,59 +1759,51 @@ def friendly_gemini_error(
 
         return (
             "⏳ *Gemini free-tier limit reached.*\n\n"
-            "Please wait for the quota to reset "
-            "and try again."
+            "Please wait for your Gemini quota "
+            "to reset and try again."
         )
 
     if (
         "api key" in lower
         or "unauthenticated" in lower
         or "permission denied" in lower
+        or "401" in lower
+        or "403" in lower
     ):
 
         return (
             "🔐 *Gemini API key problem.*\n\n"
-            "Check your `GEMINI_API_KEY` "
-            "Railway variable."
+            "Please check the GEMINI_API_KEY "
+            "variable in Railway."
         )
 
     if (
-        "not_found" in lower
+        "404" in lower
+        or "not_found" in lower
         or "model not found" in lower
     ):
 
         return (
             "⚠️ *Gemini model unavailable.*\n\n"
-            "Check your `GEMINI_MODEL` variable."
+            "The bot attempted to automatically "
+            "find an available model, but the "
+            "selected model could not be used."
         )
 
     return (
-        "❌ *AI generation failed.*\n\n"
-        "Please try again later."
+        "❌ *Gemini generation failed.*\n\n"
+        "Please try again."
     )
 
 
 # ============================================================
-# GENERATE PHOTO CAPTION
+# PHOTO CAPTION
 # ============================================================
 
-async def generate_caption(
+async def generate_photo_caption(
     message,
     context,
 ):
-
-    media_type = context.user_data.get(
-        "media_type"
-    )
-
-    if media_type == "video":
-
-        await generate_video_caption(
-            message,
-            context,
-        )
-
-        return
 
     media_path = None
     processing_message = None
@@ -1609,7 +1820,7 @@ async def generate_caption(
 
         media_path = await download_media(
             message,
-            context,
+            context
         )
 
         prompt = build_caption_prompt(
@@ -1641,13 +1852,13 @@ async def generate_caption(
         await send_long_message(
             message,
             result,
-            photo_result_keyboard(),
+            photo_result_keyboard()
         )
 
     except Exception as error:
 
         logger.exception(
-            "Photo caption failed."
+            "Photo caption generation failed."
         )
 
         if processing_message:
@@ -1683,7 +1894,7 @@ async def generate_caption(
 
 
 # ============================================================
-# GENERATE VIDEO CAPTION
+# VIDEO CAPTION
 # ============================================================
 
 async def generate_video_caption(
@@ -1700,14 +1911,14 @@ async def generate_video_caption(
         processing_message = (
             await message.reply_text(
                 "⏳ *Analyzing video...*\n\n"
-                "🎬 Extracting video frames...",
+                "🎬 Extracting frames...",
                 parse_mode="Markdown",
             )
         )
 
         video_path = await download_media(
             message,
-            context,
+            context
         )
 
         duration = video_duration(
@@ -1720,95 +1931,85 @@ async def generate_video_caption(
         ):
 
             await processing_message.edit_text(
-                f"⚠️ This video is {duration:.0f} seconds long.\n\n"
-                f"I currently process videos up to "
-                f"{MAX_VIDEO_SECONDS} seconds.\n\n"
-                "Please send a shorter clip."
+                f"⚠️ Video is {duration:.0f} seconds.\n\n"
+                f"Maximum supported duration is "
+                f"{MAX_VIDEO_SECONDS} seconds."
             )
 
             return
 
         work_directory = Path(
             tempfile.mkdtemp(
-                prefix="caption_video_"
+                prefix="video_caption_"
             )
         )
 
         frames_directory = (
-            work_directory /
-            "frames"
+            work_directory
+            / "frames"
         )
 
         frames_directory.mkdir()
 
         frames = extract_video_frames(
             video_path,
-            frames_directory,
+            frames_directory
         )
 
         if not frames:
 
             raise RuntimeError(
-                "Could not extract video frames."
+                "Unable to extract video frames."
             )
 
         await processing_message.edit_text(
-            "🎙 *Listening to the video...*\n\n"
-            "Whisper is generating the transcript.",
+            "🎙 *Transcribing video...*\n\n"
+            "Whisper is processing the audio.",
             parse_mode="Markdown",
         )
 
         audio_path = (
-            work_directory /
-            "audio.wav"
+            work_directory
+            / "audio.wav"
         )
 
         extract_audio(
             video_path,
-            audio_path,
+            audio_path
         )
 
         language = context.user_data.get(
             "language",
-            "english",
+            "english"
         )
 
         transcript_data = await asyncio.to_thread(
             transcribe_audio,
             audio_path,
-            language,
+            language
         )
 
-        transcript_text = "\n".join(
+        transcript = "\n".join(
             segment["text"]
-            for segment in transcript_data[
-                "segments"
-            ]
-        )
-
-        logger.info(
-            "Detected language: %s",
-            transcript_data.get(
-                "language"
-            ),
+            for segment
+            in transcript_data["segments"]
         )
 
         await processing_message.edit_text(
             "🤖 *Creating caption...*\n\n"
-            "Gemini is combining the video "
-            "and transcript.",
+            "Gemini is analyzing the video.",
             parse_mode="Markdown",
         )
 
         prompt = build_caption_prompt(
             context,
-            transcript_text,
+            transcript
         )
 
         result = await asyncio.to_thread(
             generate_with_gemini,
             prompt,
-            frames,
+            frames
         )
 
         context.user_data[
@@ -1838,13 +2039,13 @@ async def generate_video_caption(
         await send_long_message(
             message,
             result,
-            video_result_keyboard(),
+            video_result_keyboard()
         )
 
     except Exception as error:
 
         logger.exception(
-            "Video caption failed."
+            "Video caption generation failed."
         )
 
         if processing_message:
@@ -1857,13 +2058,9 @@ async def generate_video_caption(
 
                 pass
 
-        error_message = (
-            "❌ *Video processing failed.*\n\n"
-            f"`{str(error)[:800]}`"
-        )
-
         await message.reply_text(
-            error_message,
+            "❌ *Video processing failed.*\n\n"
+            f"`{str(error)[:800]}`",
             parse_mode="Markdown",
         )
 
@@ -1883,20 +2080,14 @@ async def generate_video_caption(
 
         if work_directory:
 
-            try:
-
-                shutil.rmtree(
-                    work_directory,
-                    ignore_errors=True,
-                )
-
-            except Exception:
-
-                pass
+            shutil.rmtree(
+                work_directory,
+                ignore_errors=True
+            )
 
 
 # ============================================================
-# VIDEO SUBTITLE PROCESSING
+# SUBTITLE PROCESSING
 # ============================================================
 
 async def process_video_subtitles(
@@ -1904,18 +2095,6 @@ async def process_video_subtitles(
     context,
     include_caption=False,
 ):
-
-    file_id = context.user_data.get(
-        "file_id"
-    )
-
-    if not file_id:
-
-        await message.reply_text(
-            "📤 Please send a video first."
-        )
-
-        return
 
     if (
         context.user_data.get(
@@ -1925,7 +2104,7 @@ async def process_video_subtitles(
     ):
 
         await message.reply_text(
-            "❌ Subtitle processing requires a video."
+            "❌ Please send a video first."
         )
 
         return
@@ -1938,15 +2117,15 @@ async def process_video_subtitles(
 
         processing_message = (
             await message.reply_text(
-                "🎬 *Preparing your captioned video...*\n\n"
-                "This can take some time on Railway.",
+                "🎬 *Preparing captioned video...*\n\n"
+                "This may take some time.",
                 parse_mode="Markdown",
             )
         )
 
         video_path = await download_media(
             message,
-            context,
+            context
         )
 
         duration = video_duration(
@@ -1973,30 +2152,30 @@ async def process_video_subtitles(
         )
 
         audio_path = (
-            work_directory /
-            "audio.wav"
+            work_directory
+            / "audio.wav"
         )
 
         extract_audio(
             video_path,
-            audio_path,
+            audio_path
         )
 
         await processing_message.edit_text(
             "🎙 *Generating subtitles...*\n\n"
-            "Whisper is transcribing the speech.",
+            "Whisper is transcribing speech.",
             parse_mode="Markdown",
         )
 
         language = context.user_data.get(
             "language",
-            "english",
+            "english"
         )
 
         transcript_data = await asyncio.to_thread(
             transcribe_audio,
             audio_path,
-            language,
+            language
         )
 
         if not transcript_data[
@@ -2004,37 +2183,37 @@ async def process_video_subtitles(
         ]:
 
             await processing_message.edit_text(
-                "❌ No speech was detected in this video."
+                "❌ No speech was detected."
             )
 
             return
 
         subtitle_file = (
-            work_directory /
-            "captions.ass"
+            work_directory
+            / "captions.ass"
         )
 
         create_ass_subtitles(
             transcript_data,
             subtitle_file,
-            language,
+            language
         )
 
         output_file = (
-            work_directory /
-            "captioned_video.mp4"
+            work_directory
+            / "captioned_video.mp4"
         )
 
         await processing_message.edit_text(
-            "🎬 *Burning captions into video...*\n\n"
-            "FFmpeg is rendering the final MP4.",
+            "🎬 *Rendering captions...*\n\n"
+            "FFmpeg is creating the final MP4.",
             parse_mode="Markdown",
         )
 
         burn_subtitles(
             video_path,
             subtitle_file,
-            output_file,
+            output_file
         )
 
         if not output_file.exists():
@@ -2049,12 +2228,13 @@ async def process_video_subtitles(
         ):
 
             await processing_message.edit_text(
-                "⚠️ The captioned video is too large "
-                "to send through Telegram.\n\n"
-                "Try a shorter or lower-resolution video."
+                "⚠️ Captioned video is too large "
+                "to send through Telegram."
             )
 
             return
+
+        caption = None
 
         if include_caption:
 
@@ -2064,26 +2244,24 @@ async def process_video_subtitles(
 
             if not caption:
 
+                transcript = "\n".join(
+                    segment["text"]
+                    for segment
+                    in transcript_data[
+                        "segments"
+                    ]
+                )
+
                 prompt = build_caption_prompt(
                     context,
-                    "\n".join(
-                        segment["text"]
-                        for segment
-                        in transcript_data[
-                            "segments"
-                        ]
-                    ),
+                    transcript
                 )
 
                 caption = await asyncio.to_thread(
                     generate_with_gemini,
                     prompt,
-                    [],
+                    []
                 )
-
-                context.user_data[
-                    "last_result"
-                ] = caption
 
         try:
 
@@ -2096,17 +2274,13 @@ async def process_video_subtitles(
         await send_captioned_video(
             message,
             output_file,
-            context.user_data.get(
-                "last_result"
-            )
-            if include_caption
-            else None,
+            caption
         )
 
     except Exception as error:
 
         logger.exception(
-            "Subtitle processing failed."
+            "Subtitle generation failed."
         )
 
         if processing_message:
@@ -2141,20 +2315,14 @@ async def process_video_subtitles(
 
         if work_directory:
 
-            try:
-
-                shutil.rmtree(
-                    work_directory,
-                    ignore_errors=True,
-                )
-
-            except Exception:
-
-                pass
+            shutil.rmtree(
+                work_directory,
+                ignore_errors=True
+            )
 
 
 # ============================================================
-# ASS TIME FORMAT
+# ASS TIME
 # ============================================================
 
 def ass_time(
@@ -2163,7 +2331,7 @@ def ass_time(
 
     seconds = max(
         float(seconds),
-        0,
+        0
     )
 
     hours = int(
@@ -2174,7 +2342,7 @@ def ass_time(
         (seconds % 3600) // 60
     )
 
-    secs = (
+    remaining = (
         seconds
         % 60
     )
@@ -2182,35 +2350,33 @@ def ass_time(
     return (
         f"{hours}:"
         f"{minutes:02d}:"
-        f"{secs:05.2f}"
+        f"{remaining:05.2f}"
     )
 
 
 # ============================================================
-# ESCAPE ASS TEXT
+# ASS ESCAPE
 # ============================================================
 
 def escape_ass(
     text
 ):
 
-    text = (
+    return (
         text
         .replace(
             "\\",
-            r"\\",
+            r"\\"
         )
         .replace(
             "{",
-            r"\{",
+            r"\{"
         )
         .replace(
             "}",
-            r"\}",
+            r"\}"
         )
     )
-
-    return text
 
 
 # ============================================================
@@ -2223,10 +2389,6 @@ def create_ass_subtitles(
     language_key,
 ):
 
-    # --------------------------------------------------------
-    # Font
-    # --------------------------------------------------------
-
     if language_key == "hindi":
 
         font_name = "Noto Sans Devanagari"
@@ -2238,10 +2400,6 @@ def create_ass_subtitles(
     else:
 
         font_name = "Arial"
-
-    # --------------------------------------------------------
-    # ASS header
-    # --------------------------------------------------------
 
     lines = [
 
@@ -2259,13 +2417,15 @@ def create_ass_subtitles(
 
         "[V4+ Styles]",
 
-        "Format: Name, Fontname, Fontsize, "
-        "PrimaryColour, SecondaryColour, "
-        "OutlineColour, BackColour, Bold, "
-        "Italic, Underline, StrikeOut, "
-        "ScaleX, ScaleY, Spacing, Angle, "
-        "BorderStyle, Outline, Shadow, "
-        "Alignment, MarginL, MarginR, MarginV, Encoding",
+        (
+            "Format: Name, Fontname, Fontsize, "
+            "PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, "
+            "Italic, Underline, StrikeOut, "
+            "ScaleX, ScaleY, Spacing, Angle, "
+            "BorderStyle, Outline, Shadow, "
+            "Alignment, MarginL, MarginR, MarginV, Encoding"
+        ),
 
         (
             f"Style: Default,"
@@ -2285,14 +2445,12 @@ def create_ass_subtitles(
 
         "[Events]",
 
-        "Format: Layer, Start, End, Style, "
-        "Name, MarginL, MarginR, MarginV, "
-        "Effect, Text",
+        (
+            "Format: Layer, Start, End, Style, "
+            "Name, MarginL, MarginR, MarginV, "
+            "Effect, Text"
+        ),
     ]
-
-    # --------------------------------------------------------
-    # Build subtitles
-    # --------------------------------------------------------
 
     for segment in transcript_data[
         "segments"
@@ -2310,12 +2468,9 @@ def create_ass_subtitles(
             segment["text"]
         )
 
-        # Word wrapping.
-        text = (
-            text.replace(
-                "\n",
-                r"\N"
-            )
+        text = text.replace(
+            "\n",
+            r"\N"
         )
 
         lines.append(
@@ -2328,7 +2483,7 @@ def create_ass_subtitles(
 
     output_file.write_text(
         "\n".join(lines),
-        encoding="utf-8",
+        encoding="utf-8"
     )
 
 
@@ -2342,7 +2497,6 @@ def burn_subtitles(
     output_file,
 ):
 
-    # FFmpeg subtitles filter expects a properly escaped path.
     subtitle_path = (
         str(subtitle_file)
         .replace(
@@ -2391,8 +2545,8 @@ def burn_subtitles(
     if result.returncode != 0:
 
         logger.error(
-            "FFmpeg error: %s",
-            result.stderr[-4000:],
+            "FFmpeg failed:\n%s",
+            result.stderr[-5000:]
         )
 
         raise RuntimeError(
@@ -2401,7 +2555,7 @@ def burn_subtitles(
 
 
 # ============================================================
-# SEND VIDEO
+# SEND CAPTIONED VIDEO
 # ============================================================
 
 async def send_captioned_video(
@@ -2410,23 +2564,23 @@ async def send_captioned_video(
     caption=None,
 ):
 
+    video_caption = (
+        "🎬 Captioned video generated."
+    )
+
     if caption:
 
-        # Telegram caption limit is much smaller than
-        # a normal message, so only use the short part.
         short_caption = extract_short_caption(
             caption
         )
 
-    else:
+        if short_caption:
 
-        short_caption = (
-            "🎬 Captioned video generated successfully."
-        )
+            video_caption = short_caption[:900]
 
     await message.reply_video(
         video=str(video_path),
-        caption=short_caption,
+        caption=video_caption,
         supports_streaming=True,
     )
 
@@ -2435,7 +2589,7 @@ async def send_captioned_video(
         await send_long_message(
             message,
             caption,
-            photo_result_keyboard(),
+            photo_result_keyboard()
         )
 
 
@@ -2462,11 +2616,9 @@ def extract_short_caption(
 
         if result:
 
-            return result[:900]
+            return result
 
-    return (
-        "🎬 Captioned video generated successfully."
-    )
+    return ""
 
 
 # ============================================================
@@ -2485,7 +2637,7 @@ async def send_long_message(
 
         await message.reply_text(
             text,
-            reply_markup=keyboard,
+            reply_markup=keyboard
         )
 
         return
@@ -2528,14 +2680,11 @@ async def send_long_message(
         chunks
     ):
 
-        if (
-            index
-            == len(chunks) - 1
-        ):
+        if index == len(chunks) - 1:
 
             await message.reply_text(
                 chunk,
-                reply_markup=keyboard,
+                reply_markup=keyboard
             )
 
         else:
@@ -2555,7 +2704,7 @@ async def error_handler(
 ):
 
     logger.exception(
-        "Unhandled application error",
+        "Unhandled application error:",
         exc_info=context.error,
     )
 
@@ -2571,22 +2720,28 @@ def main():
     )
 
     logger.info(
-        "Media Caption Generator"
+        "MEDIA CAPTION GENERATOR"
     )
 
     logger.info(
-        "Gemini model: %s",
-        GEMINI_MODEL,
+        "Gemini requested model: %s",
+        REQUESTED_GEMINI_MODEL
+        or "(automatic)"
+    )
+
+    logger.info(
+        "Gemini selected model: %s",
+        GEMINI_MODEL
     )
 
     logger.info(
         "Whisper model: %s",
-        WHISPER_MODEL_NAME,
+        WHISPER_MODEL_NAME
     )
 
     logger.info(
         "Maximum video duration: %s seconds",
-        MAX_VIDEO_SECONDS,
+        MAX_VIDEO_SECONDS
     )
 
     logger.info(
@@ -2606,21 +2761,21 @@ def main():
     application.add_handler(
         CommandHandler(
             "start",
-            start,
+            start
         )
     )
 
     application.add_handler(
         CommandHandler(
             "help",
-            help_command,
+            help_command
         )
     )
 
     application.add_handler(
         CommandHandler(
             "cancel",
-            cancel,
+            cancel
         )
     )
 
@@ -2630,7 +2785,7 @@ def main():
 
     application.add_handler(
         CallbackQueryHandler(
-            callback_handler,
+            callback_handler
         )
     )
 
@@ -2641,7 +2796,7 @@ def main():
     application.add_handler(
         MessageHandler(
             filters.PHOTO,
-            media_handler,
+            media_handler
         )
     )
 
@@ -2652,7 +2807,7 @@ def main():
     application.add_handler(
         MessageHandler(
             filters.VIDEO,
-            media_handler,
+            media_handler
         )
     )
 
@@ -2663,7 +2818,7 @@ def main():
     application.add_handler(
         MessageHandler(
             filters.Document.ALL,
-            media_handler,
+            media_handler
         )
     )
 
@@ -2675,12 +2830,12 @@ def main():
         MessageHandler(
             filters.TEXT
             & ~filters.COMMAND,
-            text_handler,
+            text_handler
         )
     )
 
     # --------------------------------------------------------
-    # ERROR
+    # ERRORS
     # --------------------------------------------------------
 
     application.add_error_handler(
@@ -2688,7 +2843,7 @@ def main():
     )
 
     logger.info(
-        "Bot is running."
+        "Telegram bot is running."
     )
 
     application.run_polling(
