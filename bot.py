@@ -1,21 +1,19 @@
 import os
-import base64
+import re
+import asyncio
 import logging
 import tempfile
 import subprocess
+import mimetypes
 
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction
 
 from telegram.ext import (
@@ -34,41 +32,20 @@ from telegram.ext import (
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv(
-    "BOT_TOKEN",
-    ""
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+GEMINI_MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-3.5-flash-lite"
 ).strip()
 
-OPENAI_API_KEY = os.getenv(
-    "OPENAI_API_KEY",
-    ""
-).strip()
+MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 
-OPENAI_MODEL = os.getenv(
-    "OPENAI_MODEL",
-    "gpt-5.6"
-).strip()
+MAX_VIDEO_SECONDS = 60
 
-
-if not BOT_TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN environment variable is missing."
-    )
-
-
-if not OPENAI_API_KEY:
-    raise RuntimeError(
-        "OPENAI_API_KEY environment variable is missing."
-    )
-
-
-# ============================================================
-# OPENAI
-# ============================================================
-
-client = OpenAI(
-    api_key=OPENAI_API_KEY
-)
+VIDEO_FRAME_COUNT = 5
 
 
 # ============================================================
@@ -76,242 +53,187 @@ client = OpenAI(
 # ============================================================
 
 logging.basicConfig(
-    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO
+)
 
-    format=(
-        "%(asctime)s | "
-        "%(levelname)s | "
-        "%(name)s | "
-        "%(message)s"
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# GEMINI CLIENT
+# ============================================================
+
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "BOT_TOKEN environment variable is missing."
     )
+
+if not GEMINI_API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY environment variable is missing."
+    )
+
+client = genai.Client(
+    api_key=GEMINI_API_KEY
 )
-
-logger = logging.getLogger(
-    "media-caption-generator"
-)
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
-
-MAX_VIDEO_SECONDS = 60
-
-VIDEO_FRAME_COUNT = 5
-
-MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 
 # ============================================================
 # CAPTION STYLES
 # ============================================================
 
-STYLES = {
-
+CAPTION_STYLES = {
     "instagram": "Instagram",
-
-    "short": "Short and Catchy",
-
+    "short": "Short",
     "funny": "Funny",
-
     "professional": "Professional",
-
     "travel": "Travel",
-
     "romantic": "Romantic",
-
-    "viral": "Trendy and Viral",
-
+    "viral": "Viral",
     "aesthetic": "Aesthetic",
-
     "attitude": "Attitude",
-
     "bollywood": "Bollywood",
-
+    "custom": "Custom"
 }
 
-
-# ============================================================
-# LANGUAGES
-# ============================================================
 
 LANGUAGES = {
-
     "english": "English",
-
     "hindi": "Hindi",
-
     "hinglish": "Hinglish",
-
-    "punjabi": "Punjabi",
-
+    "punjabi": "Punjabi"
 }
 
 
 # ============================================================
-# STYLE KEYBOARD
+# KEYBOARDS
 # ============================================================
 
 def style_keyboard():
 
-    keyboard = [
-
+    buttons = [
         [
             InlineKeyboardButton(
                 "📸 Instagram",
                 callback_data="style:instagram"
             ),
-
             InlineKeyboardButton(
-                "⚡ Short",
+                "✨ Short",
                 callback_data="style:short"
-            ),
+            )
         ],
-
         [
             InlineKeyboardButton(
                 "😂 Funny",
                 callback_data="style:funny"
             ),
-
             InlineKeyboardButton(
                 "💼 Professional",
                 callback_data="style:professional"
-            ),
+            )
         ],
-
         [
             InlineKeyboardButton(
                 "✈️ Travel",
                 callback_data="style:travel"
             ),
-
             InlineKeyboardButton(
                 "❤️ Romantic",
                 callback_data="style:romantic"
-            ),
+            )
         ],
-
         [
             InlineKeyboardButton(
                 "🔥 Viral",
                 callback_data="style:viral"
             ),
-
             InlineKeyboardButton(
-                "✨ Aesthetic",
+                "🌸 Aesthetic",
                 callback_data="style:aesthetic"
-            ),
+            )
         ],
-
         [
             InlineKeyboardButton(
                 "😎 Attitude",
                 callback_data="style:attitude"
             ),
-
             InlineKeyboardButton(
                 "🎬 Bollywood",
                 callback_data="style:bollywood"
-            ),
+            )
         ],
-
         [
             InlineKeyboardButton(
-                "🎨 Custom",
+                "✍️ Custom Style",
                 callback_data="style:custom"
-            ),
-        ],
-
+            )
+        ]
     ]
 
-    return InlineKeyboardMarkup(
-        keyboard
-    )
+    return InlineKeyboardMarkup(buttons)
 
-
-# ============================================================
-# LANGUAGE KEYBOARD
-# ============================================================
 
 def language_keyboard():
 
-    keyboard = [
-
+    buttons = [
         [
             InlineKeyboardButton(
                 "🇬🇧 English",
-                callback_data="language:english"
+                callback_data="lang:english"
             ),
-
             InlineKeyboardButton(
                 "🇮🇳 Hindi",
-                callback_data="language:hindi"
-            ),
+                callback_data="lang:hindi"
+            )
         ],
-
         [
             InlineKeyboardButton(
                 "🗣 Hinglish",
-                callback_data="language:hinglish"
+                callback_data="lang:hinglish"
             ),
-
             InlineKeyboardButton(
-                "🅿️ Punjabi",
-                callback_data="language:punjabi"
-            ),
-        ],
-
+                "🪯 Punjabi",
+                callback_data="lang:punjabi"
+            )
+        ]
     ]
 
-    return InlineKeyboardMarkup(
-        keyboard
-    )
+    return InlineKeyboardMarkup(buttons)
 
-
-# ============================================================
-# RESULT KEYBOARD
-# ============================================================
 
 def result_keyboard():
 
-    keyboard = [
-
+    buttons = [
         [
             InlineKeyboardButton(
                 "🔄 Regenerate",
-                callback_data="result:regenerate"
-            ),
-
-            InlineKeyboardButton(
-                "🎨 New Style",
-                callback_data="result:style"
-            ),
+                callback_data="action:regenerate"
+            )
         ],
-
         [
             InlineKeyboardButton(
-                "🌐 New Language",
-                callback_data="result:language"
+                "🎨 New Style",
+                callback_data="action:style"
             ),
+            InlineKeyboardButton(
+                "🌐 New Language",
+                callback_data="action:language"
+            )
         ],
-
         [
             InlineKeyboardButton(
                 "📤 New Media",
-                callback_data="result:new"
-            ),
-        ],
-
+                callback_data="action:new"
+            )
+        ]
     ]
 
-    return InlineKeyboardMarkup(
-        keyboard
-    )
+    return InlineKeyboardMarkup(buttons)
 
 
 # ============================================================
-# START
+# COMMANDS
 # ============================================================
 
 async def start(
@@ -321,84 +243,48 @@ async def start(
 
     context.user_data.clear()
 
-    text = """
-✨ *MEDIA CAPTION GENERATOR*
-
-Welcome!
-
-Send me a photo or video and I will
-generate a social-media caption.
-
-🎨 *Styles*
-
-📸 Instagram
-⚡ Short
-😂 Funny
-💼 Professional
-✈️ Travel
-❤️ Romantic
-🔥 Viral
-✨ Aesthetic
-😎 Attitude
-🎬 Bollywood
-🎨 Custom
-
-🌐 *Languages*
-
-🇬🇧 English
-🇮🇳 Hindi
-🗣 Hinglish
-🅿️ Punjabi
-
-📸 Send your media to begin.
-"""
-
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown"
+    message = (
+        "🎨 MEDIA CAPTION GENERATOR\n\n"
+        "Welcome!\n\n"
+        "Send me a photo or video and I will "
+        "generate creative captions and hashtags.\n\n"
+        "✨ Features:\n"
+        "📸 Photo captions\n"
+        "🎥 Video captions\n"
+        "🔥 Instagram captions\n"
+        "😂 Funny captions\n"
+        "❤️ Romantic captions\n"
+        "✈️ Travel captions\n"
+        "🌐 Multiple languages\n"
+        "#️⃣ Relevant hashtags\n\n"
+        "Powered by Google Gemini.\n\n"
+        "📤 Send a photo or video to begin."
     )
 
+    await update.message.reply_text(message)
 
-# ============================================================
-# HELP
-# ============================================================
 
 async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    text = """
-📖 *HOW TO USE*
-
-1. Send a photo or video.
-
-2. Select a caption style.
-
-3. Select a language.
-
-4. AI analyzes your media.
-
-5. Caption and hashtags are generated.
-
-6. Use Regenerate for another caption.
-
-Commands:
-
-/start
-/help
-/cancel
-"""
-
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown"
+    message = (
+        "📖 HOW TO USE\n\n"
+        "1. Send a photo or video.\n"
+        "2. Choose a caption style.\n"
+        "3. Select your language.\n"
+        "4. Receive captions and hashtags.\n\n"
+        "You can regenerate captions or change "
+        "the style and language.\n\n"
+        "Commands:\n"
+        "/start - Start the bot\n"
+        "/help - Show instructions\n"
+        "/cancel - Cancel current request"
     )
 
+    await update.message.reply_text(message)
 
-# ============================================================
-# CANCEL
-# ============================================================
 
 async def cancel(
     update: Update,
@@ -408,55 +294,9 @@ async def cancel(
     context.user_data.clear()
 
     await update.message.reply_text(
-        "❌ Cancelled.\n\n"
-        "Send a new photo or video."
+        "✅ Current request cancelled.\n\n"
+        "Send another photo or video."
     )
-
-
-# ============================================================
-# MEDIA DETECTION
-# ============================================================
-
-def detect_media(
-    message
-):
-
-    if message.photo:
-
-        return (
-            "photo",
-            message.photo[-1].file_id
-        )
-
-    if message.video:
-
-        return (
-            "video",
-            message.video.file_id
-        )
-
-    if message.document:
-
-        mime = (
-            message.document.mime_type
-            or ""
-        )
-
-        if mime.startswith("image/"):
-
-            return (
-                "photo",
-                message.document.file_id
-            )
-
-        if mime.startswith("video/"):
-
-            return (
-                "video",
-                message.document.file_id
-            )
-
-    return None, None
 
 
 # ============================================================
@@ -470,54 +310,72 @@ async def media_handler(
 
     message = update.effective_message
 
-    media_type, file_id = detect_media(
-        message
-    )
+    media_type = None
+    file_id = None
 
-    if not media_type:
+    if message.photo:
 
-        await message.reply_text(
-            "Please send a photo or video."
-        )
+        media_type = "photo"
+        file_id = message.photo[-1].file_id
+
+    elif message.video:
+
+        media_type = "video"
+        file_id = message.video.file_id
+
+    elif message.document:
+
+        document = message.document
+
+        mime = document.mime_type or ""
+
+        if mime.startswith("image/"):
+
+            media_type = "photo"
+
+        elif mime.startswith("video/"):
+
+            media_type = "video"
+
+        else:
+
+            await message.reply_text(
+                "❌ Unsupported file type.\n\n"
+                "Please send an image or video."
+            )
+
+            return
+
+        file_id = document.file_id
+
+    else:
 
         return
 
-    context.user_data[
-        "media_type"
-    ] = media_type
+    context.user_data.clear()
 
-    context.user_data[
-        "file_id"
-    ] = file_id
+    context.user_data["file_id"] = file_id
 
-    context.user_data[
-        "original_caption"
-    ] = message.caption or ""
+    context.user_data["media_type"] = media_type
 
-    context.user_data[
-        "style"
-    ] = None
+    context.user_data["original_caption"] = (
+        message.caption or ""
+    )
 
-    context.user_data[
-        "language"
-    ] = None
-
-    context.user_data[
-        "custom_style"
-    ] = None
+    context.user_data["stage"] = "style"
 
     await message.reply_text(
         "✅ Media received!\n\n"
-        "Choose a caption style:",
+        "🎨 Choose your caption style:",
         reply_markup=style_keyboard()
     )
 
 
 # ============================================================
-# CUSTOM STYLE REQUEST
+# CALLBACK HANDLER
 # ============================================================
 
-async def custom_style_request(
+async def callback_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
@@ -526,35 +384,109 @@ async def custom_style_request(
 
     await query.answer()
 
-    context.user_data[
-        "waiting_custom_style"
-    ] = True
+    data = query.data or ""
 
-    await query.edit_message_text(
-        """
-🎨 *CUSTOM STYLE*
+    if data.startswith("style:"):
 
-Type the caption style you want.
+        style = data.split(":", 1)[1]
 
-Examples:
+        if style not in CAPTION_STYLES:
+            return
 
-• Luxury
-• Gen Z
-• Bollywood
-• Emotional
-• Savage
-• Punjabi swag
-• One liner
-• Classy
-• Motivational
-• Romantic
-""",
-        parse_mode="Markdown"
-    )
+        if not context.user_data.get("file_id"):
+
+            await query.message.reply_text(
+                "Please send a photo or video first."
+            )
+
+            return
+
+        context.user_data["style"] = style
+
+        if style == "custom":
+
+            context.user_data["stage"] = "custom"
+
+            await query.message.reply_text(
+                "✍️ Describe the caption style you want.\n\n"
+                "Example:\n"
+                "Create an emotional Instagram caption "
+                "with a poetic tone."
+            )
+
+            return
+
+        context.user_data["stage"] = "language"
+
+        await query.message.reply_text(
+            "🌐 Select caption language:",
+            reply_markup=language_keyboard()
+        )
+
+        return
+
+    if data.startswith("lang:"):
+
+        language = data.split(":", 1)[1]
+
+        if language not in LANGUAGES:
+            return
+
+        context.user_data["language"] = language
+
+        context.user_data["stage"] = "generating"
+
+        await generate_caption(
+            query.message,
+            context
+        )
+
+        return
+
+    if data == "action:regenerate":
+
+        await generate_caption(
+            query.message,
+            context
+        )
+
+        return
+
+    if data == "action:style":
+
+        context.user_data["stage"] = "style"
+
+        await query.message.reply_text(
+            "🎨 Choose another style:",
+            reply_markup=style_keyboard()
+        )
+
+        return
+
+    if data == "action:language":
+
+        context.user_data["stage"] = "language"
+
+        await query.message.reply_text(
+            "🌐 Choose another language:",
+            reply_markup=language_keyboard()
+        )
+
+        return
+
+    if data == "action:new":
+
+        context.user_data.clear()
+
+        await query.message.reply_text(
+            "📤 Send a new photo or video."
+        )
+
+        return
 
 
 # ============================================================
-# TEXT HANDLER
+# CUSTOM STYLE HANDLER
 # ============================================================
 
 async def text_handler(
@@ -562,755 +494,217 @@ async def text_handler(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if not context.user_data.get(
-        "waiting_custom_style"
-    ):
+    stage = context.user_data.get("stage")
+
+    if stage == "custom":
+
+        custom_style = update.message.text.strip()
+
+        if not custom_style:
+
+            await update.message.reply_text(
+                "Please enter a custom style."
+            )
+
+            return
+
+        context.user_data["custom_style"] = custom_style
+
+        context.user_data["stage"] = "language"
 
         await update.message.reply_text(
-            "📸 Please send a photo or video."
-        )
-
-        return
-
-    custom_style = (
-        update.message.text or ""
-    ).strip()
-
-    if not custom_style:
-
-        return
-
-    context.user_data[
-        "custom_style"
-    ] = custom_style
-
-    context.user_data[
-        "waiting_custom_style"
-    ] = False
-
-    await update.message.reply_text(
-        "✅ Custom style saved.\n\n"
-        "Now choose the language:",
-        reply_markup=language_keyboard()
-    )
-
-
-# ============================================================
-# STYLE CALLBACK
-# ============================================================
-
-async def style_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    style = query.data.split(
-        ":",
-        1
-    )[1]
-
-    if style == "custom":
-
-        await custom_style_request(
-            update,
-            context
-        )
-
-        return
-
-    context.user_data[
-        "style"
-    ] = style
-
-    await query.edit_message_text(
-        "🎨 Style selected:\n\n"
-        f"*{STYLES[style]}*\n\n"
-        "Choose your language:",
-        parse_mode="Markdown",
-        reply_markup=language_keyboard()
-    )
-
-
-# ============================================================
-# LANGUAGE CALLBACK
-# ============================================================
-
-async def language_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    language = query.data.split(
-        ":",
-        1
-    )[1]
-
-    context.user_data[
-        "language"
-    ] = language
-
-    await generate_caption_response(
-        update,
-        context
-    )
-
-
-# ============================================================
-# RESULT CALLBACK
-# ============================================================
-
-async def result_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    action = query.data.split(
-        ":",
-        1
-    )[1]
-
-    if action == "regenerate":
-
-        await generate_caption_response(
-            update,
-            context,
-            regenerate=True
-        )
-
-        return
-
-    if action == "style":
-
-        await query.edit_message_text(
-            "🎨 Choose a new style:",
-            reply_markup=style_keyboard()
-        )
-
-        return
-
-    if action == "language":
-
-        await query.edit_message_text(
-            "🌐 Choose a language:",
+            "🌐 Select caption language:",
             reply_markup=language_keyboard()
         )
 
         return
 
-    if action == "new":
-
-        context.user_data.clear()
-
-        await query.edit_message_text(
-            "📸 Send your new photo or video."
-        )
-
-
-# ============================================================
-# DOWNLOAD MEDIA
-# ============================================================
-
-async def download_media(
-    context
-):
-
-    media_type = context.user_data[
-        "media_type"
-    ]
-
-    file_id = context.user_data[
-        "file_id"
-    ]
-
-    telegram_file = await (
-        context.bot.get_file(
-            file_id
-        )
+    await update.message.reply_text(
+        "📤 Please send a photo or video.\n\n"
+        "Use /help for instructions."
     )
 
-    if media_type == "photo":
 
-        suffix = ".jpg"
+# ============================================================
+# PROMPT GENERATOR
+# ============================================================
+
+def build_prompt(user_data):
+
+    style_key = user_data.get(
+        "style",
+        "instagram"
+    )
+
+    language_key = user_data.get(
+        "language",
+        "english"
+    )
+
+    style = CAPTION_STYLES.get(
+        style_key,
+        "Instagram"
+    )
+
+    language = LANGUAGES.get(
+        language_key,
+        "English"
+    )
+
+    custom_style = user_data.get(
+        "custom_style",
+        ""
+    )
+
+    original_caption = user_data.get(
+        "original_caption",
+        ""
+    )
+
+    if style_key == "custom" and custom_style:
+
+        style_instruction = custom_style
 
     else:
 
-        suffix = ".mp4"
-
-    temporary = tempfile.NamedTemporaryFile(
-        delete=False,
-        suffix=suffix
-    )
-
-    temporary.close()
-
-    await telegram_file.download_to_drive(
-        temporary.name
-    )
-
-    return Path(
-        temporary.name
-    )
-
-
-# ============================================================
-# IMAGE TO DATA URL
-# ============================================================
-
-def image_to_data_url(
-    path
-):
-
-    if path.stat().st_size > MAX_IMAGE_BYTES:
-
-        raise ValueError(
-            "Image is too large."
+        style_instruction = (
+            f"Create a {style} style caption."
         )
 
-    encoded = base64.b64encode(
-        path.read_bytes()
-    ).decode("utf-8")
+    prompt = f"""
+You are a professional social media caption writer.
 
-    extension = path.suffix.lower()
+Analyze the attached visual media carefully.
 
-    if extension == ".png":
+Your job is to create engaging captions for social media.
 
-        mime = "image/png"
+CAPTION STYLE:
+{style_instruction}
 
-    elif extension == ".webp":
+LANGUAGE:
+{language}
 
-        mime = "image/webp"
+USER'S ORIGINAL DESCRIPTION:
+{original_caption or "No description provided."}
 
-    else:
+IMPORTANT RULES:
 
-        mime = "image/jpeg"
+1. Analyze the visible content accurately.
 
-    return (
-        f"data:{mime};base64,{encoded}"
-    )
+2. Do not invent specific people, locations,
+   events, or identities.
+
+3. Create one main caption.
+
+4. Make the caption natural and engaging.
+
+5. Include suitable emojis.
+
+6. Generate 12 relevant hashtags.
+
+7. Generate one short alternative caption.
+
+8. Do not mention that you are an AI.
+
+9. Avoid generic unrelated hashtags.
+
+10. Match the requested language.
+
+11. For Hindi, use Devanagari script.
+
+12. For Hinglish, use natural Roman-script
+    Hindi mixed with English.
+
+13. For Punjabi, use Gurmukhi script.
+
+14. If the media is a video, consider the
+    progression of events visible in its frames.
+
+OUTPUT FORMAT:
+
+📸 CAPTION
+
+[Main caption]
+
+
+#️⃣ HASHTAGS
+
+[12 relevant hashtags]
+
+
+✨ SHORT CAPTION
+
+[Short alternative]
+
+Return only the requested content.
+"""
+
+    return prompt
 
 
 # ============================================================
-# VIDEO FRAME EXTRACTION
+# VIDEO PROCESSING
 # ============================================================
 
-def extract_video_frames(
-    video_path
-):
+def video_duration(video_path):
 
-    output_directory = Path(
-        tempfile.mkdtemp(
-            prefix="caption_frames_"
-        )
-    )
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video_path)
+    ]
 
-    probe = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(video_path)
-        ],
+    result = subprocess.run(
+        command,
         capture_output=True,
         text=True,
         timeout=20
     )
 
+    if result.returncode != 0:
+        return 0
+
     try:
+        return float(result.stdout.strip())
 
-        duration = float(
-            probe.stdout.strip()
-        )
+    except ValueError:
+        return 0
 
-    except Exception:
 
-        duration = MAX_VIDEO_SECONDS
+def extract_video_frames(video_path, output_dir):
+
+    duration = video_duration(video_path)
+
+    if duration <= 0:
+        duration = 10
 
     duration = min(
         duration,
         MAX_VIDEO_SECONDS
     )
 
-    frames = []
+    frame_paths = []
 
-    for index in range(
-        VIDEO_FRAME_COUNT
-    ):
+    for index in range(VIDEO_FRAME_COUNT):
 
-        if VIDEO_FRAME_COUNT == 1:
+        timestamp = (
+            duration * (index + 0.5)
+            / VIDEO_FRAME_COUNT
+        )
 
-            timestamp = 0
-
-        else:
-
-            timestamp = (
-                duration
-                * index
-                / (VIDEO_FRAME_COUNT - 1)
-            )
-
-        frame = (
-            output_directory
+        output_path = (
+            Path(output_dir)
             / f"frame_{index}.jpg"
         )
 
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-ss",
-                str(timestamp),
-                "-i",
-                str(video_path),
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale='min(1024,iw)':-2",
-                str(frame)
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=30
-        )
-
-        if (
-            result.returncode == 0
-            and frame.exists()
-        ):
-
-            frames.append(
-                frame
-            )
-
-    if not frames:
-
-        raise RuntimeError(
-            "Could not extract video frames."
-        )
-
-    return frames
-
-
-# ============================================================
-# PROMPT
-# ============================================================
-
-def create_prompt(
-    context,
-    regenerate=False
-):
-
-    style = context.user_data.get(
-        "style",
-        "instagram"
-    )
-
-    language = context.user_data.get(
-        "language",
-        "english"
-    )
-
-    custom_style = context.user_data.get(
-        "custom_style"
-    )
-
-    original_caption = context.user_data.get(
-        "original_caption",
-        ""
-    )
-
-    if custom_style:
-
-        style_name = custom_style
-
-    else:
-
-        style_name = STYLES.get(
-            style,
-            "Instagram"
-        )
-
-    language_name = LANGUAGES.get(
-        language,
-        "English"
-    )
-
-    if regenerate:
-
-        regeneration = (
-            "Create a substantially different "
-            "caption from the previous version."
-        )
-
-    else:
-
-        regeneration = (
-            "Create the best possible caption."
-        )
-
-    return f"""
-You are an expert social media copywriter.
-
-Analyze the supplied image or video frames.
-
-Caption style:
-{style_name}
-
-Language:
-{language_name}
-
-Rules:
-
-- Only describe what is visible or reasonably
-  inferable.
-- Never invent names.
-- Never invent locations.
-- Never invent events.
-- Never invent brands.
-- Never invent dates.
-- Never invent relationships.
-- Do not mention AI.
-- Do not mention filenames.
-- Do not include URLs.
-- Do not create fake credits.
-- Do not say "Video by..." unless supplied
-  by the user.
-- Use natural language.
-- Use tasteful emojis.
-- Generate 8-15 relevant hashtags.
-- Avoid repetitive hashtags.
-- Match the selected language.
-- Make the caption suitable for social media.
-
-Return:
-
-CAPTION:
-<caption>
-
-HASHTAGS:
-#hashtag1 #hashtag2 #hashtag3
-
-OPTIONAL_SHORT:
-<short alternative>
-
-{regeneration}
-
-Original media caption:
-
-{original_caption or "(none)"}
-""".strip()
-
-
-# ============================================================
-# OPENAI IMAGE REQUEST
-# ============================================================
-
-def analyze_images(
-    image_urls,
-    prompt
-):
-
-    content = [
-
-        {
-            "type": "input_text",
-            "text": prompt
-        }
-
-    ]
-
-    for image_url in image_urls:
-
-        content.append(
-            {
-                "type": "input_image",
-                "image_url": image_url,
-                "detail": "high"
-            }
-        )
-
-    response = client.responses.create(
-
-        model=OPENAI_MODEL,
-
-        input=[
-            {
-                "role": "user",
-                "content": content
-            }
-        ]
-    )
-
-    return response.output_text.strip()
-
-
-# ============================================================
-# GENERATE CAPTION
-# ============================================================
-
-async def generate_caption(
-    context,
-    media_path
-):
-
-    prompt = create_prompt(
-        context,
-        context.user_data.get(
-            "regenerate",
-            False
-        )
-    )
-
-    if context.user_data[
-        "media_type"
-    ] == "photo":
-
-        image_urls = [
-
-            image_to_data_url(
-                media_path
-            )
-
-        ]
-
-    else:
-
-        frames = extract_video_frames(
-            media_path
-        )
-
-        image_urls = [
-
-            image_to_data_url(
-                frame
-            )
-
-            for frame in frames
-        ]
-
-    return analyze_images(
-        image_urls,
-        prompt
-    )
-
-
-# ============================================================
-# GENERATE RESPONSE
-# ============================================================
-
-async def generate_caption_response(
-    update,
-    context,
-    regenerate=False
-):
-
-    context.user_data[
-        "regenerate"
-    ] = regenerate
-
-    query = update.callback_query
-
-    message = query.message
-
-    await message.edit_text(
-        "⏳ *Analyzing your media...*\n\n"
-        "✨ Creating your caption...",
-        parse_mode="Markdown"
-    )
-
-    await context.bot.send_chat_action(
-        chat_id=message.chat_id,
-        action=ChatAction.TYPING
-    )
-
-    media_path = None
-
-    try:
-
-        media_path = await download_media(
-            context
-        )
-
-        result = await generate_caption(
-            context,
-            media_path
-        )
-
-        if len(result) > 3800:
-
-            result = (
-                result[:3800]
-                + "..."
-            )
-
-        await message.reply_text(
-            "✨ *GENERATED CAPTION*\n\n"
-            + result,
-            parse_mode="Markdown",
-            reply_markup=result_keyboard()
-        )
-
-    except Exception as error:
-
-        logger.exception(
-            "Caption generation failed"
-        )
-
-        await message.reply_text(
-            "❌ Caption generation failed.\n\n"
-            f"Error:\n{str(error)[:1000]}"
-        )
-
-    finally:
-
-        if media_path:
-
-            try:
-
-                media_path.unlink(
-                    missing_ok=True
-                )
-
-            except Exception:
-
-                pass
-
-
-# ============================================================
-# ERROR HANDLER
-# ============================================================
-
-async def error_handler(
-    update,
-    context
-):
-
-    logger.exception(
-        "Unhandled error",
-        exc_info=context.error
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    application = (
-        Application
-        .builder()
-        .token(BOT_TOKEN)
-        .concurrent_updates(False)
-        .build()
-    )
-
-    # Commands
-
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "help",
-            help_command
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "cancel",
-            cancel
-        )
-    )
-
-    # Photos and videos
-
-    application.add_handler(
-        MessageHandler(
-            (
-                filters.PHOTO
-                | filters.VIDEO
-                | filters.Document.IMAGE
-                | filters.Document.VIDEO
-            ),
-            media_handler
-        )
-    )
-
-    # Style buttons
-
-    application.add_handler(
-        CallbackQueryHandler(
-            style_callback,
-            pattern=r"^style:"
-        )
-    )
-
-    # Language buttons
-
-    application.add_handler(
-        CallbackQueryHandler(
-            language_callback,
-            pattern=r"^language:"
-        )
-    )
-
-    # Result buttons
-
-    application.add_handler(
-        CallbackQueryHandler(
-            result_callback,
-            pattern=r"^result:"
-        )
-    )
-
-    # Text
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND,
-            text_handler
-        )
-    )
-
-    application.add_error_handler(
-        error_handler
-    )
-
-    logger.info(
-        "Media Caption Generator is running."
-    )
-
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES
-    )
-
-
-# ============================================================
-# START APPLICATION
-# ============================================================
-
-if __name__ == "__main__":
-
-    main()
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-
