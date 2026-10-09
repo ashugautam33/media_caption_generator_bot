@@ -627,6 +627,15 @@ LANGUAGES = {
         ),
     },
 
+    "hinglish": {
+        "name": "Hinglish",
+        "whisper": None,
+        "instruction": (
+            "Write natural Hinglish in Roman script, mixing Hindi and English. "
+            "Do not use Devanagari unless the user explicitly asks for it."
+        ),
+    },
+
     "punjabi": {
         "name": "Punjabi",
         "whisper": "pa",
@@ -699,6 +708,8 @@ async def start(
         "I can create:\n"
         "• Instagram captions\n"
         "• Hashtags\n"
+        "• English captions\n"
+        "• Hinglish captions\n"
         "• Hindi captions\n"
         "• Punjabi captions\n"
         "• Video subtitles\n"
@@ -907,6 +918,16 @@ def language_keyboard():
                 "English",
                 callback_data="language:english",
             ),
+        ],
+
+        [
+            InlineKeyboardButton(
+                "Hinglish",
+                callback_data="language:hinglish",
+            ),
+        ],
+
+        [
             InlineKeyboardButton(
                 "Hindi",
                 callback_data="language:hindi",
