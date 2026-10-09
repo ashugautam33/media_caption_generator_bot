@@ -2,5 +2,5 @@ python-telegram-bot==22.8
 google-genai
 python-dotenv
 faster-whisper
-av>=11,<19
+av==18.1.0
 yt-dlp
